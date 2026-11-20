@@ -1,149 +1,431 @@
-import tkinter as tk
-import math
-import time
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Raycasting FPS - iPad Edition</title>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; touch-action: none; font-family: Arial, sans-serif; }
+    canvas { display: block; width: 100%; height: 100%; }
+    #ui {
+        position: absolute; bottom: 0; left: 0; width: 100%; height: 100%;
+        pointer-events: none;
+    }
+    .btn {
+        position: absolute;
+        background: rgba(255,255,255,0.3);
+        border: 2px solid white;
+        color: white; font-weight: bold; font-size: 18px;
+        border-radius: 50%;
+        display: flex; align-items: center; justify-content: center;
+        pointer-events: auto;
+        user-select: none;
+        -webkit-user-select: none;
+    }
+    .btn:active { background: rgba(255,255,255,0.7); color: black; }
+    #btnGrab { width: 70px; height: 70px; bottom: 140px; left: 50%; transform: translateX(-120px); }
+    #btnStrike { width: 70px; height: 70px; bottom: 140px; left: 50%; transform: translateX(50px); }
+    #joystickBase { 
+        position: absolute; bottom: 30px; left: 50px; width: 140px; height: 140px; 
+        border-radius: 50%; border: 2px solid rgba(255,255,255,0.5); pointer-events: auto;
+    }
+    #joystickKnob {
+        position: absolute; width: 60px; height: 60px; border-radius: 50%;
+        background: rgba(255,255,255,0.6); top: 50%; left: 50%;
+        transform: translate(-50%, -50%); pointer-events: none;
+    }
+    #crosshair {
+        position: absolute; top: 50%; left: 50%; width: 20px; height: 20px;
+        transform: translate(-50%, -50%); pointer-events: none;
+    }
+    #crosshair::before, #crosshair::after {
+        content: ''; position: absolute; background: red;
+    }
+    #crosshair::before { width: 2px; height: 20px; left: 9px; }
+    #crosshair::after { width: 20px; height: 2px; top: 9px; }
+    #status { position: absolute; top: 20px; left: 20px; color: white; font-size: 16px; text-shadow: 1px 1px 2px black; }
+</style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<div id="ui">
+    <div id="crosshair"></div>
+    <div id="status">Empty Hand</div>
+    <div id="joystickBase"><div id="joystickKnob"></div></div>
+    <div class="btn" id="btnGrab">E / 抓</div>
+    <div class="btn" id="btnStrike">攻击</div>
+</div>
 
-class Fake3DGame:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Tkinter Pseudo-3D FPS")
-        self.canvas = tk.Canvas(root, width=1000, height=700, bg='lightblue')
-        self.canvas.pack()
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const statusDiv = document.getElementById('status');
+const joystickBase = document.getElementById('joystickBase');
+const joystickKnob = document.getElementById('joystickKnob');
+const btnGrab = document.getElementById('btnGrab');
+const btnStrike = document.getElementById('btnStrike');
 
-        # 游戏状态变量
-        self.player_x = 0
-        self.player_y = 0
-        self.player_z = 0 # 跳跃高度
-        self.is_locked = False # Fixed Action 状态
-        self.held_item = None # 当前拿着的物品
-        
-        # 摇杆数据 (模拟值，范围 -1.0 到 1.0)
-        self.left_stick = {'x': 0, 'y': 0}
-        self.right_stick = {'x': 0, 'y': 0}
-        
-        # 动画状态
-        self.weapon_angle = 0
-        self.is_swinging = False
+let W, H;
+function resize() {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+}
+window.addEventListener('resize', resize);
+resize();
 
-        # 绑定鼠标拖动来模拟摇杆 (实际游戏中可以用虚拟摇杆)
-        self.canvas.bind("<B1-Motion>", lambda e: self.move_stick(e, 'left'))
-        self.canvas.bind("<Button-1>", lambda e: self.reset_sticks(e, 'left'))
-        self.canvas.bind("<B3-Motion>", lambda e: self.move_stick(e, 'right'))
-        self.canvas.bind("<Button-3>", lambda e: self.reset_sticks(e, 'right'))
-        
-        # 键盘快捷键测试（比如空格攻击）
-        self.root.bind("<space>", self.start_swing)
+// --- Game Constants ---
+const MAP_SIZE = 12;
+const TILE = 64;
+const FOV = Math.PI / 3;
+const HALF_FOV = FOV / 2;
+const NUM_RAYS = 200; // Lower for iPad performance
+const MAX_DEPTH = 800;
+const DELTA_ANGLE = FOV / NUM_RAYS;
+const DIST = (W / 2) / Math.tan(HALF_FOV);
+const PROJ_COEFF = DIST * TILE;
 
-        # 绘制 UI 和按钮 (这里只是简单示意)
-        self.setup_ui()
-        
-        # 启动游戏循环
-        self.game_loop()
+const MAP = [
+    [1,1,1,1,1,1,1,1,1,1,1,1],
+    [1,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,0,1,1,0,0,0,0,1,0,1],
+    [1,0,0,1,0,0,0,0,0,1,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,0,0,0,1,1,0,0,0,0,1],
+    [1,0,0,0,0,1,0,0,0,0,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,1],
+    [1,0,0,1,0,0,0,0,0,1,0,1],
+    [1,0,0,0,0,0,0,0,0,0,0,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1],
+];
 
-    def setup_ui(self):
-        # 绘制左摇杆背景
-        self.canvas.create_oval(150, 500, 350, 700, outline='black', width=3)
-        # 绘制右摇杆背景
-        self.canvas.create_oval(750, 500, 950, 700, outline='green', width=3)
-        
-        # 绘制按钮 (左侧)
-        self.btn_jump = tk.Button(self.root, text="Jump", command=self.do_jump)
-        self.canvas.create_window(150, 450, window=self.btn_jump)
-        
-        self.btn_fixed = tk.Button(self.root, text="Fixed Action", command=self.toggle_lock)
-        self.canvas.create_window(250, 450, window=self.btn_fixed)
-        
-        self.btn_grab = tk.Button(self.root, text="Grab", command=self.do_grab)
-        self.canvas.create_window(350, 450, window=self.btn_grab)
+// --- Game State ---
+let player = {
+    x: 2.5, y: 2.5, angle: 0, speed: 0.08,
+    heldItem: null,
+    isSwinging: false, swingTimer: 0, swingAngle: 0,
+    strikeOffset: 0, isStriking: false,
+    gunRecoil: 0, muzzleFlash: 0
+};
 
-    # --- 按钮逻辑 ---
-    def do_jump(self):
-        if self.player_z == 0: # 只有在地上才能跳
-            self.player_z = 50 # 跳跃高度
-            # 这里可以加一个简单的下落动画
+let weapons = [];
+const weaponTypes = ['sword', 'spear', 'gun'];
+for (let i = 0; i < 10; i++) {
+    while (true) {
+        let wx = Math.random() * (MAP_SIZE - 2) + 1.5;
+        let wy = Math.random() * (MAP_SIZE - 2) + 1.5;
+        if (MAP[Math.floor(wy)][Math.floor(wx)] === 0) {
+            weapons.push({ x: wx, y: wy, type: weaponTypes[Math.floor(Math.random() * 3)] });
+            break;
+        }
+    }
+}
+
+// --- Input Handling ---
+let leftStick = { x: 0, y: 0, active: false, id: null };
+let rightTouch = { x: 0, y: 0, startX: 0, startY: 0, active: false, id: null, lastMoveTime: 0, lastX: 0 };
+
+// Joystick
+joystickBase.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    leftStick.active = true;
+    leftStick.id = e.changedTouches[0].identifier;
+});
+window.addEventListener('touchmove', (e) => {
+    for (let t of e.changedTouches) {
+        if (t.identifier === leftStick.id) {
+            let rect = joystickBase.getBoundingClientRect();
+            let cx = rect.left + rect.width / 2;
+            let cy = rect.top + rect.height / 2;
+            let dx = t.clientX - cx;
+            let dy = t.clientY - cy;
+            let dist = Math.hypot(dx, dy);
+            let max = rect.width / 2;
+            if (dist > max) { dx = dx / dist * max; dy = dy / dist * max; }
+            leftStick.x = dx / max;
+            leftStick.y = dy / max;
+            joystickKnob.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
+        }
+        if (t.identifier === rightTouch.id) {
+            let dx = t.clientX - rightTouch.startX;
+            let dy = t.clientY - rightTouch.startY;
+            rightTouch.x = dx;
+            rightTouch.y = dy;
             
-    def toggle_lock(self):
-        self.is_locked = not self.is_locked
-        print(f"Fixed Action Active: {self.is_locked}")
-        
-    def do_grab(self):
-        # 这里应该检查屏幕中心是否有物体，有的话捡起来
-        # 简单演示：直接拿起长矛
-        if self.held_item is None:
-            self.held_item = "spear"
-            print("Grabbed spear")
-
-    def start_swing(self, event=None):
-        if not self.is_swinging and self.held_item:
-            self.is_swinging = True
-            self.weapon_angle = 0 # 开始角度
-            # 动画由 game_loop 处理
-
-    # --- 摇杆逻辑 ---
-    def move_stick(self, event, stick_type):
-        if self.is_locked and stick_type == 'left':
-            return # 如果锁定了，忽略左摇杆输入
+            // Right screen look & swing detection
+            let now = performance.now() / 1000;
+            let timeDiff = now - rightTouch.lastMoveTime;
+            let speed = Math.abs(dx) / Math.max(timeDiff, 0.01);
             
-        # 简化的摇杆计算，计算拖拽中心点
-        # 实际应用中需要更精确地计算相对距离
-        print(f"{stick_type} stick moved to: {event.x}, {event.y}")
+            if (player.heldItem === 'sword' || player.heldItem === 'spear') {
+                if (speed > 200 && timeDiff < 0.5 && Math.abs(dx) > 50) {
+                    if (!player.isSwinging) {
+                        player.isSwinging = true;
+                        player.swingTimer = now;
+                        player.swingAngle = dx > 0 ? -60 : 60;
+                    }
+                }
+            }
+            rightTouch.lastMoveTime = now;
+            rightTouch.startX = t.clientX;
+            rightTouch.startY = t.clientY;
+        }
+    }
+}, { passive: false });
 
-    def reset_sticks(self, event, stick_type):
-        if stick_type == 'left':
-            self.left_stick = {'x': 0, 'y': 0}
-        else:
-            self.right_stick = {'x': 0, 'y': 0}
+window.addEventListener('touchend', (e) => {
+    for (let t of e.changedTouches) {
+        if (t.identifier === leftStick.id) {
+            leftStick.active = false;
+            leftStick.id = null;
+            leftStick.x = 0; leftStick.y = 0;
+            joystickKnob.style.transform = 'translate(-50%, -50%)';
+        }
+        if (t.identifier === rightTouch.id) {
+            // Gun release = shoot
+            if (player.heldItem === 'gun' && rightTouch.active) {
+                player.gunRecoil = 40;
+                player.muzzleFlash = 5;
+            }
+            rightTouch.active = false;
+            rightTouch.id = null;
+        }
+    }
+});
 
-    # --- 游戏循环与渲染 ---
-    def game_loop(self):
-        # 1. 处理移动逻辑 (根据 left_stick)
-        if not self.is_locked:
-            # self.player_x += self.left_stick['x'] * speed
-            # self.player_y += self.left_stick['y'] * speed
-            pass
+// Right side touch start (look)
+canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    for (let t of e.changedTouches) {
+        if (t.clientX > W / 2 && !rightTouch.active) {
+            rightTouch.active = true;
+            rightTouch.id = t.identifier;
+            rightTouch.startX = t.clientX;
+            rightTouch.startY = t.clientY;
+            rightTouch.lastMoveTime = performance.now() / 1000;
+        }
+    }
+}, { passive: false });
 
-        # 2. 处理跳跃物理
-        if self.player_z > 0:
-            self.player_z -= 5
-            if self.player_z < 0: self.player_z = 0
+// Buttons
+btnGrab.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    // Grab logic
+    for (let i = weapons.length - 1; i >= 0; i--) {
+        let w = weapons[i];
+        let dist = Math.hypot(w.x - player.x, w.y - player.y);
+        if (dist < 1.5) {
+            player.heldItem = w.type;
+            weapons.splice(i, 1);
+            statusDiv.textContent = "Holding: " + w.type;
+            break;
+        }
+    }
+}, { passive: false });
 
-        # 3. 处理武器动画
-        if self.is_swinging:
-            self.weapon_angle += 10 # 挥动速度
-            if self.weapon_angle > 90: # 挥动结束
-                self.weapon_angle = 0
-                self.is_swinging = False
+btnStrike.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    if ((player.heldItem === 'sword' || player.heldItem === 'spear') && !player.isStriking) {
+        player.isStriking = true;
+        player.strikeOffset = 0;
+    }
+}, { passive: false });
 
-        # 4. 重绘画面
-        self.draw_scene()
+// Mouse support (for testing on PC)
+canvas.addEventListener('mousedown', (e) => {
+    if (player.heldItem === 'gun') {
+        player.gunRecoil = 40;
+        player.muzzleFlash = 5;
+    }
+});
+canvas.addEventListener('mousemove', (e) => {
+    if (e.buttons === 1) {
+        player.angle += e.movementX * 0.003;
+    }
+});
 
-        # 5. 循环调用
-        self.root.after(30, self.game_loop) # 约 33 FPS
+// --- Rendering ---
+function castRays() {
+    let startAngle = player.angle - HALF_FOV;
+    for (let ray = 0; ray < NUM_RAYS; ray++) {
+        let angle = startAngle + ray * DELTA_ANGLE;
+        let sinA = Math.sin(angle), cosA = Math.cos(angle);
+        for (let depth = 1; depth < MAX_DEPTH; depth += 2) {
+            let targetX = player.x + depth * cosA * 0.01;
+            let targetY = player.y + depth * sinA * 0.01;
+            let col = Math.floor(targetX);
+            let row = Math.floor(targetY);
+            if (row < 0 || row >= MAP_SIZE || col < 0 || col >= MAP_SIZE) break;
+            if (MAP[row][col] === 1) {
+                depth *= Math.cos(player.angle - angle);
+                let wallHeight = PROJ_COEFF / (depth + 0.0001);
+                let shade = Math.min(255, Math.floor(255 / (1 + depth * depth * 0.0001)));
+                ctx.fillStyle = `rgb(${shade},${shade},${shade})`;
+                let rayWidth = W / NUM_RAYS;
+                ctx.fillRect(ray * rayWidth, H / 2 - wallHeight / 2, rayWidth + 1, wallHeight);
+                break;
+            }
+        }
+    }
+}
 
-    def draw_scene(self):
-        self.canvas.delete("all") # 清空画面
+function drawWeaponsOnFloor() {
+    let sortedWeapons = weapons.slice().sort((a, b) => {
+        let da = Math.hypot(a.x - player.x, a.y - player.y);
+        let db = Math.hypot(b.x - player.x, b.y - player.y);
+        return db - da;
+    });
+    
+    for (let w of sortedWeapons) {
+        let dx = w.x - player.x, dy = w.y - player.y;
+        let dist = Math.hypot(dx, dy);
+        let angle = Math.atan2(dy, dx);
+        let deltaAngle = ((angle - player.angle + Math.PI) % (2 * Math.PI)) - Math.PI;
         
-        # 绘制背景 (随玩家位置偏移)
-        # self.canvas.create_rectangle(...) 
-        # self.canvas.create_line(0, 350 + self.player_z, 1000, 350 + self.player_z, fill='green', width=2) # 地平线
-
-        # 绘制准星
-        self.canvas.create_oval(490, 340, 510, 360, outline='red')
-
-        # 绘制手和武器 (右下角)
-        if self.held_item == "spear":
-            # 根据 weapon_angle 计算长矛的绘制坐标
-            # 这是一个简化的长矛绘制
-            start_x, start_y = 800, 600 
-            end_x = start_x - 100 * math.cos(math.radians(self.weapon_angle))
-            end_y = start_y - 300 * math.sin(math.radians(self.weapon_angle))
-            self.canvas.create_line(start_x, start_y, end_x, end_y, fill='brown', width=5)
+        if (Math.abs(deltaAngle) < HALF_FOV) {
+            let screenX = W / 2 + Math.tan(deltaAngle) * DIST;
+            let spriteSize = Math.min(200, PROJ_COEFF / (dist + 0.0001));
             
-        # 绘制手 (简单的形状)
-        self.canvas.create_oval(750, 550, 850, 650, fill='peachpuff', outline='black')
+            if (screenX > 0 && screenX < W) {
+                let color = '#888';
+                if (w.type === 'sword') color = '#ccc';
+                else if (w.type === 'spear') color = '#963';
+                else if (w.type === 'gun') color = '#333';
+                
+                let shade = Math.max(0, 1 - dist / 10);
+                ctx.fillStyle = color;
+                ctx.globalAlpha = shade;
+                ctx.fillRect(screenX - spriteSize/2, H/2 + 50, spriteSize, spriteSize/2);
+                ctx.globalAlpha = 1;
+                ctx.strokeStyle = '#000';
+                ctx.strokeRect(screenX - spriteSize/2, H/2 + 50, spriteSize, spriteSize/2);
+                
+                if (dist < 1.5) {
+                    ctx.fillStyle = '#ff0';
+                    ctx.font = 'bold 20px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.fillText("按 'E' 抓取", screenX, H/2 - 50);
+                }
+            }
+        }
+    }
+}
 
-        # 绘制 UI 按钮 (如果删除了这里需要重新画，但我们在 setup_ui 里用了 Tkinter 组件，所以不需要画在 canvas 上)
+function drawHandAndWeapon() {
+    let handX = W - 200, handY = H - 100;
+    let now = performance.now() / 1000;
+    
+    if (player.isSwinging && now - player.swingTimer > 0.3) {
+        player.isSwinging = false;
+        player.swingAngle = 0;
+    }
+    if (player.isStriking) {
+        player.strikeOffset += 15;
+        if (player.strikeOffset > 80) {
+            player.isStriking = false;
+            player.strikeOffset = 0;
+        }
+    }
+    if (player.gunRecoil > 0) player.gunRecoil -= 4;
+    if (player.muzzleFlash > 0) player.muzzleFlash -= 1;
+    
+    if (player.heldItem === 'sword') {
+        ctx.fillStyle = '#ffdcb4';
+        ctx.beginPath(); ctx.arc(handX, handY, 40, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = '#000'; ctx.stroke();
+        
+        let angle = (-90 + player.swingAngle) * Math.PI / 180;
+        let tipX = handX + 250 * Math.cos(angle) + player.strikeOffset;
+        let tipY = handY + 250 * Math.sin(angle) - player.strikeOffset;
+        ctx.strokeStyle = '#c0c0c0'; ctx.lineWidth = 12;
+        ctx.beginPath(); ctx.moveTo(handX, handY); ctx.lineTo(tipX, tipY); ctx.stroke();
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 4;
+        ctx.beginPath(); ctx.moveTo(handX, handY); ctx.lineTo(tipX, tipY); ctx.stroke();
+        
+    } else if (player.heldItem === 'spear') {
+        let h1x = W - 250, h1y = H - 50;
+        let h2x = W - 200, h2y = H - 150;
+        ctx.fillStyle = '#ffdcb4';
+        ctx.beginPath(); ctx.arc(h1x, h1y, 30, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(h2x, h2y, 30, 0, Math.PI * 2); ctx.fill();
+        
+        let angle = (-90 + player.swingAngle) * Math.PI / 180;
+        let tipX = h1x + 350 * Math.cos(angle) + player.strikeOffset;
+        let tipY = h1y + 350 * Math.sin(angle) - player.strikeOffset;
+        ctx.strokeStyle = '#8b4513'; ctx.lineWidth = 8;
+        ctx.beginPath(); ctx.moveTo(h1x, h1y); ctx.lineTo(tipX, tipY); ctx.stroke();
+        
+        ctx.fillStyle = '#c0c0c0';
+        ctx.beginPath();
+        ctx.moveTo(tipX, tipY);
+        ctx.lineTo(tipX - 10, tipY + 20);
+        ctx.lineTo(tipX + 10, tipY + 20);
+        ctx.closePath(); ctx.fill();
+        
+    } else if (player.heldItem === 'gun') {
+        let aimX = handX, aimY = handY - player.gunRecoil;
+        ctx.fillStyle = '#ffdcb4';
+        ctx.beginPath(); ctx.arc(aimX, aimY, 40, 0, Math.PI * 2); ctx.fill();
+        
+        ctx.fillStyle = '#333';
+        ctx.fillRect(aimX - 20, aimY - 80, 40, 70);
+        ctx.strokeStyle = '#000'; ctx.lineWidth = 10;
+        ctx.beginPath(); ctx.moveTo(aimX, aimY - 80); ctx.lineTo(aimX, aimY - 130); ctx.stroke();
+        
+        if (player.muzzleFlash > 0) {
+            ctx.fillStyle = '#ff0';
+            ctx.beginPath(); ctx.arc(aimX, aimY - 140, 20, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#f80';
+            ctx.beginPath(); ctx.arc(aimX, aimY - 140, 10, 0, Math.PI * 2); ctx.fill();
+        }
+    } else {
+        ctx.fillStyle = '#ffdcb4';
+        ctx.beginPath(); ctx.arc(handX, handY, 40, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = '#000'; ctx.stroke();
+    }
+}
 
-if __name__ == "__main__":
-    root = tk.Tk()
-    game = Fake3DGame(root)
-    root.mainloop()
+let lastTime = performance.now();
+function gameLoop() {
+    let now = performance.now();
+    let dt = (now - lastTime) / 1000;
+    lastTime = now;
+    
+    // Movement
+    let sinA = Math.sin(player.angle), cosA = Math.cos(player.angle);
+    let dx = 0, dy = 0;
+    if (leftStick.active) {
+        dx = (cosA * -leftStick.y + sinA * leftStick.x) * player.speed;
+        dy = (sinA * -leftStick.y - cosA * leftStick.x) * player.speed;
+    }
+    
+    if (MAP[Math.floor(player.y)][Math.floor(player.x + dx)] === 0) player.x += dx;
+    if (MAP[Math.floor(player.y + dy)][Math.floor(player.x)] === 0) player.y += dy;
+    
+    // View rotation from right touch
+    if (rightTouch.active) {
+        let lookDx = rightTouch.x;
+        player.angle += lookDx * 0.002;
+        rightTouch.x = 0;
+    }
+    
+    // Render
+    ctx.fillStyle = '#87CEEB';
+    ctx.fillRect(0, 0, W, H / 2);
+    ctx.fillStyle = '#228B22';
+    ctx.fillRect(0, H / 2, W, H / 2);
+    
+    castRays();
+    drawWeaponsOnFloor();
+    drawHandAndWeapon();
+    
+    requestAnimationFrame(gameLoop);
+}
+
+gameLoop();
+</script>
+</body>
+</html>
